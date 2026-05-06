@@ -22,7 +22,7 @@ namespace MiniChattingAppClient
                 ReferenceLoopHandling = ReferenceLoopHandling.Ignore
             };
             var client = new TcpClient();
-            var ipAddress = IPAddress.Parse("192.168.0.239");
+            var ipAddress = IPAddress.Parse("10.0.14.43");
             var port = 44000;
             var ep = new IPEndPoint(ipAddress, port);
             Console.Write("Enter email: ", Console.ForegroundColor = ConsoleColor.White);
@@ -53,6 +53,7 @@ namespace MiniChattingAppClient
                 case (ConsoleKey.NumPad1):
                     {
                         SendMessage(client, "_users");
+                        SendMessage(client, "_chatHistory");
                         Console.Clear();
                         ShowUsers(email);
                         ShowMessagesStatus(email);
@@ -100,11 +101,21 @@ namespace MiniChattingAppClient
             }
         }
 
-        private static void ChatPage(TcpClient client, string senderEmail, int id)
+        private static void ChatPage(TcpClient client, string senderEmail, int receiverId)
         {
-            var user = _users.FirstOrDefault(u => u.Id == id);
+            var receiverUser = _users.FirstOrDefault(u => u.Id == receiverId);
+            var senderUser = _users.FirstOrDefault(u => u.Email == senderEmail);
 
-            Console.WriteLine($"=====Chat With \"{user!.Username}\"=====");
+            var messages = _messages.Where(m => m.SenderId == senderUser.Id || m.ReceiverId == receiverId);
+
+            Console.WriteLine($"=====Chat With \"{receiverUser!.Username}\"=====");
+            foreach (var msg in messages)
+            {
+                if (msg.SenderId == senderUser.Id)
+                {
+                    msg.Content.ShowMsgSender();
+                }
+            }
             while (true)
             {
                 Console.Write("Enter message: ");
@@ -113,7 +124,7 @@ namespace MiniChattingAppClient
                 {
                     SenderEmail = senderEmail,
                     Content = msg,
-                    ReceiverEmail = user.Email
+                    ReceiverEmail = receiverUser.Email
                 };
                 var json = JsonConvert.SerializeObject(chat);
                 SendMessage(client, json);
@@ -124,6 +135,10 @@ namespace MiniChattingAppClient
             if (_users.Count == 0)
             {
                 "No online\\offline user".ShowWarningMessage();
+            }
+            else if(_users.Count == 1)
+            {
+                "No other user except you, no one to chat with".ShowWarningMessage();
             }
             else
             {
@@ -148,7 +163,7 @@ namespace MiniChattingAppClient
         private static void ShowMessagesStatus(string email)
         {
             var user = _users.FirstOrDefault(u => u.Email == email);
-            if(user == null)
+            if (user == null)
             {
                 Console.WriteLine("No new message");
                 return;
@@ -205,7 +220,7 @@ namespace MiniChattingAppClient
                 if (result.StartsWith(":E"))
                 {
                     result.Remove(0, 3).ShowRedText();
-                    Main();
+                    _ = Main();
                 }
                 if (result.StartsWith(":I"))
                 {
@@ -215,10 +230,10 @@ namespace MiniChattingAppClient
                 else if (Helper.IsValidJson(result))
                 {
                     var jsonFile = JsonDocument.Parse(result);
-                    var type = jsonFile.RootElement[1].GetProperty("Type").GetString();
+                    var type = jsonFile.RootElement[0].GetProperty("Type").GetString();
                     if (type == "user")
                         _users = JsonConvert.DeserializeObject<List<User>>(result)!;
-                    if (type == "message")
+                    else if (type == "message")
                         _messages = JsonConvert.DeserializeObject<List<Message>>(result)!;
                 }
                 else

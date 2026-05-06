@@ -3,6 +3,7 @@ using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -66,6 +67,12 @@ namespace MiniChattingAppClient
             Console.WriteLine(txt,Console.ForegroundColor = ConsoleColor.Red);
             Console.ResetColor();
         }
-
+        internal static void ShowMsgSender(this string txt)
+        {
+            var consoleSize = Console.WindowWidth;
+            var txtLen = txt.Length;
+            var txt2 = txt.PadLeft(consoleSize - txtLen);
+            Console.WriteLine(txt2);
+        }
     }
 }
