@@ -70,8 +70,7 @@ namespace MiniChattingAppClient
         internal static void ShowMsgSender(this string txt)
         {
             var consoleSize = Console.WindowWidth;
-            var txtLen = txt.Length;
-            var txt2 = txt.PadLeft(consoleSize - txtLen);
+            var txt2 = txt.PadLeft(consoleSize);
             Console.WriteLine(txt2);
         }
     }
