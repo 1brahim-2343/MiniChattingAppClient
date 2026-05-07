@@ -1,5 +1,8 @@
-﻿using MiniChattingAppClient.Entities;
+﻿using Microsoft.VisualBasic;
+using MiniChattingAppClient.Entities;
+using NAudio.Wave;
 using Newtonsoft.Json;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Mail;
 using System.Net.Sockets;
@@ -7,6 +10,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
+using static System.Net.WebRequestMethods;
 
 namespace MiniChattingAppClient
 {
@@ -14,8 +18,10 @@ namespace MiniChattingAppClient
     {
         static ManualResetEventSlim _usersReady = new ManualResetEventSlim(false);
         static ManualResetEventSlim _messagesReady = new ManualResetEventSlim(false);
-        static ManualResetEventSlim _fileMessagesReady = new ManualResetEventSlim(false); // events to prevent race condition
+        static ManualResetEventSlim _fileMessagesReady = new ManualResetEventSlim(false);
+        static ManualResetEventSlim _fileDownloadingReady = new ManualResetEventSlim(false);// events to prevent race condition
         private const string SaveFolder = "ReceivedFiles";
+        private const string SaveRecords = "Records";
 
         private static List<User> _users = [];
         private static List<Message> _messages = [];
@@ -47,9 +53,31 @@ namespace MiniChattingAppClient
             string username = Console.ReadLine()!;
             _ = Task.Factory.StartNew(() => { ConnectServer(ep, client, email, username); },
                  TaskCreationOptions.LongRunning);
-            await Task.Delay(10);
+            await Task.Delay(50);
+            if (!CheckVerificationStatus(client, email))
+            {
+            VerificationStart:
+                "You are not verified".ShowWarningMessage();
+                int code = SendVerificationCode(email, username);
+                Console.Write("Enter the code: ");
+                var input = Console.ReadLine();
+                if (int.TryParse(input, out int intInput) && intInput == code)
+                {
+                    User myUser = _users.FirstOrDefault(u => u.Email == email)!;
+                    var jsonUser = JsonConvert.SerializeObject(myUser);
+                    SendMessage(client, jsonUser);
+                    Console.WriteLine("Verified");
+                }
+                else
+                {
+                    goto VerificationStart;
+                }
+            }
+
             while (true)
             {
+                await Task.Delay(400);
+                Console.Clear();
                 Console.WriteLine("[1]. Show users");
                 Console.WriteLine("[2]. Go to received files");
 
@@ -59,10 +87,12 @@ namespace MiniChattingAppClient
                     case (ConsoleKey.D1):
                     case (ConsoleKey.NumPad1):
                         {
+                            _usersReady.Reset();
+                            _messagesReady.Reset();
                             SendMessage(client, "_users");
                             SendMessage(client, "_chatHistory");
                             _usersReady.Wait();
-                            _messagesReady.Wait(100);
+                            _messagesReady.Wait();
                             Console.Clear();
                             ShowUsers(email);
                             ShowMessagesStatus(email);
@@ -85,18 +115,8 @@ namespace MiniChattingAppClient
                                 case (ConsoleKey.D1):
                                 case (ConsoleKey.NumPad1):
                                     {
-
-
-                                        //UserChoice:
-                                        //    Console.Write("Choose user to chat with: ");
-                                        //    string strIndex = Console.ReadLine()!;
-                                        //    if (!int.TryParse(strIndex, out int intIndex))
-                                        //    {
-                                        //        "Invalid input".ShowRedText();
-                                        //        goto UserChoice;
-                                        //    }
-                                        //    var receiverId = _users[intIndex - 1].Id;
                                         ChatPageMessage(client, email, receiverId);
+                                        UserStatusEmail(email, receiverId);
                                         break;
                                     }
                                 case (ConsoleKey.D2):
@@ -104,7 +124,16 @@ namespace MiniChattingAppClient
                                     {
                                         SendMessage(client, "--file");
                                         _isReceivingFile = true;
-                                        await FileSender(client, email, receiverId);
+                                        await FileSenderAsync(client, email, receiverId);
+                                        UserStatusEmail(email, receiverId);
+                                        break;
+                                    }
+                                case (ConsoleKey.D3):
+                                case (ConsoleKey.NumPad3):
+                                    {
+                                        SendMessage(client, "--voice");
+                                        await VoicePage(client, email, receiverId);
+                                        UserStatusEmail(email, receiverId);
                                         break;
                                     }
                                 default:
@@ -116,6 +145,8 @@ namespace MiniChattingAppClient
                     case (ConsoleKey.D2):
                     case (ConsoleKey.NumPad2):
                         {
+                            _usersReady.Reset();
+                            _fileMessagesReady.Reset();
                             SendMessage(client, "_users");
                             _usersReady.Wait();
 
@@ -124,14 +155,46 @@ namespace MiniChattingAppClient
                             _fileMessagesReady.Wait(200);
                             User me = _users.FirstOrDefault(u => u.Email == email)!;
                             var myFiles = me.ReceivedFiles;
-                            foreach (var myFile in myFiles)
+                            for (int i = 0; i < myFiles.Count; i++)
                             {
-                                Console.WriteLine($"{myFile.Id}. {myFile.Path}");
+                                if (myFiles[i].Path!.EndsWith(".wav"))
+                                    Console.WriteLine($"Voice message: {i + 1}. {myFiles[i].Path}");
+                                else
+                                    Console.WriteLine($"{i + 1}. {myFiles[i].Path}");
                             }
-                            var fileMessageChoice = int.Parse(Console.ReadLine()!);
-                            var readyFileString = "_fileID:" + fileMessageChoice;
-                            SendMessage(client, readyFileString);
-                            await FileGetter(client);
+
+
+                            if (myFiles.Count > 0)
+                            {
+                                var fileMessageChoice = int.Parse(Console.ReadLine()!);
+                                var chosenFile = myFiles[fileMessageChoice - 1];
+                                var readyFileString = "_fileID:" + chosenFile.Id;
+                                SendMessage(client, readyFileString);
+                                _fileDownloadingReady.Wait();
+                                _fileDownloadingReady.Reset();
+                                if (!chosenFile.Path!.EndsWith(".wav"))
+                                {
+                                    var dbPath = myFiles[fileMessageChoice - 1].Path!.Split("\\");
+                                    var fullPath = dbPath[0] + " " + email + "\\" + dbPath[1];
+                                    Process.Start(new ProcessStartInfo
+                                    {
+                                        FileName = fullPath,
+                                        UseShellExecute = true
+                                    });
+                                }
+                                else
+                                {
+                                    Process.Start(new ProcessStartInfo
+                                    {
+                                        FileName = myFiles[fileMessageChoice - 1].Path!,
+                                        UseShellExecute = true
+                                    });
+                                }
+                            }
+                            else
+                            {
+                                Console.WriteLine("NO received files");
+                            }
                             break;
                         }
                     default:
@@ -143,9 +206,187 @@ namespace MiniChattingAppClient
 
         }
 
-        private static async Task FileGetter(TcpClient client)
+        private static int SendVerificationCode(string email, string username)
         {
-            Directory.CreateDirectory(SaveFolder);
+            string fromEmail = "azrvf4409@gmail.com";
+            string appPassword = "dypd akbl ujtc hyhl";
+            var mail = new MailMessage();
+            Random rnd = new Random();
+            int verificationCode = rnd.Next(100000, 999999);
+
+            mail.From = new MailAddress(fromEmail);
+            mail.To.Add(email);
+
+            mail.Subject = "Verify Your MiniChat Account";
+            mail.IsBodyHtml = true;
+            mail.Body = $@"
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            margin: 0;
+            padding: 0;
+        }}
+        .container {{
+            max-width: 500px;
+            margin: 40px auto;
+            background-color: #ffffff;
+            border-radius: 10px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }}
+        .header {{
+            background-color: #4A90D9;
+            padding: 24px;
+            text-align: center;
+        }}
+        .header h1 {{
+            color: #ffffff;
+            margin: 0;
+            font-size: 22px;
+        }}
+        .body {{
+            padding: 30px;
+            text-align: center;
+        }}
+        .body p {{
+            color: #555555;
+            font-size: 16px;
+            line-height: 1.6;
+        }}
+        .code {{
+            display: inline-block;
+            background-color: #f0f6ff;
+            color: #4A90D9;
+            font-size: 36px;
+            font-weight: bold;
+            letter-spacing: 10px;
+            padding: 16px 32px;
+            border-radius: 10px;
+            border: 2px dashed #4A90D9;
+            margin: 20px 0;
+        }}
+        .warning {{
+            font-size: 13px;
+            color: #aaaaaa;
+            margin-top: 10px;
+        }}
+        .footer {{
+            background-color: #f4f4f4;
+            text-align: center;
+            padding: 14px;
+            font-size: 12px;
+            color: #aaaaaa;
+        }}
+    </style>
+</head>
+<body>
+    <div class='container'>
+        <div class='header'>
+            <h1>📬 MiniChat</h1>
+        </div>
+        <div class='body'>
+            <p>Hey there,</p>
+            <p>Welcome to MiniChat! Use the verification code below to confirm your account:</p>
+            <div class='code'>{verificationCode}</div>
+            <p class='warning'>This code expires in 10 minutes. Do not share it with anyone.</p>
+        </div>
+        <div class='footer'>
+            MiniChatting App &mdash; Stay connected
+        </div>
+    </div>
+</body>
+</html>";
+
+            var smtpClient = new SmtpClient("smtp.gmail.com")
+            {
+                Port = 587,
+                Credentials = new NetworkCredential(fromEmail, appPassword),
+                EnableSsl = true
+            };
+
+            try
+            {
+                smtpClient.Send(mail);
+
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("ERROR");
+                Console.WriteLine(ex.Message, Console.ForegroundColor = ConsoleColor.Red);
+                Console.ResetColor();
+            }
+            return verificationCode;
+        }
+
+        private static bool CheckVerificationStatus(TcpClient client, string email)
+        {
+            _usersReady.Reset();
+            SendMessage(client, "_users");
+            _usersReady.Wait();
+            User myUser = _users.FirstOrDefault(u => u.Email == email)!;
+            if (myUser != null && myUser.IsVerified == true)
+                return true;
+            else if (myUser != null && myUser.IsVerified == false)
+                return false;
+            return false;
+        }
+
+
+        private static async Task VoicePage(TcpClient client, string email, int receiverId)
+        {
+            Directory.CreateDirectory("Records");
+
+            DateTime now = DateTime.Now;
+            string fileName = now.ToString("yyyy-MM-dd_HH-mm-ss") + "_" + email + ".wav";
+            string filePath = $"Records/{fileName}";
+
+            string infoOfVoice = now.ToString("yyyy-MM-dd_HH-mm-ss") + "\n" + email + "\n" + receiverId;
+            SendMessage(client, infoOfVoice);
+
+            Console.WriteLine("Press any key to start recording (max 2 mins)...");
+            Console.ReadKey();
+
+            var waveFormat = new WaveFormat(44100, 1);
+
+            using (var waveFile = new WaveFileWriter(filePath, waveFormat))
+            using (var waveIn = new WaveInEvent())
+            {
+                waveIn.WaveFormat = waveFormat;
+                waveIn.DataAvailable += (s, e) =>
+                {
+                    waveFile.Write(e.Buffer, 0, e.BytesRecorded);
+                };
+
+                waveIn.StartRecording();
+                Console.WriteLine("Recording... Press any key to stop");
+                Console.ReadKey();
+                waveIn.StopRecording();
+                Console.WriteLine("Stopped");
+            }
+
+            Console.WriteLine($"Saved at Records\\{fileName}");
+
+            var audioBytes = await System.IO.File.ReadAllBytesAsync(filePath);
+
+            _isReceivingFile = true;
+            var stream = client.GetStream();
+            var bw = new BinaryWriter(stream);
+            bw.Write((long)audioBytes.Length);
+            await stream.WriteAsync(audioBytes);
+            _isReceivingFile = false;
+
+            Console.WriteLine("Voice sent successfully");
+        }
+
+
+        private static async Task FileGetter(TcpClient client, string email)
+        {
+            var perUserFolder = SaveFolder + " " + email;
+            Directory.CreateDirectory(perUserFolder);
             var stream = client.GetStream();
 
             //1. Read filename len
@@ -173,7 +414,7 @@ namespace MiniChattingAppClient
             Console.WriteLine($"Receiving file: {fileName}");
             Console.WriteLine($"File size: {fileSize} bytes");
 
-            string savePath = Path.Combine(SaveFolder, fileName);
+            string savePath = Path.Combine(perUserFolder, fileName);
 
             //4. Read file bytes and save
             byte[] buffer = new byte[8192];
@@ -204,17 +445,18 @@ namespace MiniChattingAppClient
             }
             Console.WriteLine($"File saved:{savePath}");
             _isReceivingFile = false;
+            _fileDownloadingReady.Set();
 
         }
 
-        private static async Task FileSender(TcpClient client, string email, int receiverId)
+        private static async Task FileSenderAsync(TcpClient client, string email, int receiverId)
         {
             var address = email + "\n" + receiverId;
             SendMessage(client, address);
             Console.WriteLine("Enter file path : ");
             string? filePath = Console.ReadLine();
 
-            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
+            if (string.IsNullOrWhiteSpace(filePath) || !System.IO.File.Exists(filePath))
             {
                 Console.WriteLine("File not found");
                 return;
@@ -256,6 +498,8 @@ namespace MiniChattingAppClient
             }
 
             Console.WriteLine("File sent successfully");
+            var receiverUser = _users.FirstOrDefault(u => u.Id == receiverId);
+            var senderUser = _users.FirstOrDefault(u => u.Email == email);
         }
 
         private static void ChatPageMessage(TcpClient client, string myEmail, int receiverId)
@@ -286,7 +530,7 @@ namespace MiniChattingAppClient
                     {
                         Console.WriteLine(fullMsg);
                     }
-                }   
+                }
             }
             while (true)
             {
@@ -294,8 +538,7 @@ namespace MiniChattingAppClient
                 var msg = Console.ReadLine();
                 if (msg == "_exit")
                 {
-
-                    return;
+                    break;
                 }
                 Chat chat = new Chat
                 {
@@ -308,6 +551,120 @@ namespace MiniChattingAppClient
                 SendMessage(client, json);
             }
         }
+
+        private static void UserStatusEmail(string myEmail, int receiverId)
+        {
+            var senderUser = _users.FirstOrDefault(u => u.Email == myEmail);
+            var receiverUser = _users.FirstOrDefault(u => u.Id == receiverId);
+            if (receiverUser!.IsOnline == false)
+            {
+                string fromEmail = "azrvf4409@gmail.com";
+                string appPassword = "dypd akbl ujtc hyhl";
+                string toEmail = receiverUser.Email!;
+                var mail = new MailMessage();
+
+                mail.From = new MailAddress(fromEmail);
+                mail.To.Add(toEmail);
+
+                mail.Subject = "New Message";
+                mail.IsBodyHtml = true;
+                mail.Body = $@"
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            margin: 0;
+            padding: 0;
+        }}
+        .container {{
+            max-width: 500px;
+            margin: 40px auto;
+            background-color: #ffffff;
+            border-radius: 10px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }}
+        .header {{
+            background-color: #4A90D9;
+            padding: 24px;
+            text-align: center;
+        }}
+        .header h1 {{
+            color: #ffffff;
+            margin: 0;
+            font-size: 22px;
+        }}
+        .body {{
+            padding: 30px;
+            text-align: center;
+        }}
+        .body p {{
+            color: #555555;
+            font-size: 16px;
+            line-height: 1.6;
+        }}
+        .badge {{
+            display: inline-block;
+            background-color: #4A90D9;
+            color: white;
+            padding: 10px 24px;
+            border-radius: 20px;
+            font-size: 15px;
+            margin-top: 16px;
+        }}
+        .footer {{
+            background-color: #f4f4f4;
+            text-align: center;
+            padding: 14px;
+            font-size: 12px;
+            color: #aaaaaa;
+        }}
+    </style>
+</head>
+<body>
+    <div class='container'>
+        <div class='header'>
+            <h1>📬 MiniChat</h1>
+        </div>
+        <div class='body'>
+            <p>Hey there,</p>
+            <p>You missed a message while you were offline.</p>
+            <p>Log back in to see what you missed!</p>
+            <div class='badge'>You have a new message</div>
+        </div>
+        <div class='footer'>
+            MiniChatting App &mdash; Stay connected
+        </div>
+    </div>
+</body>
+</html>";
+
+                var smtpClient = new SmtpClient("smtp.gmail.com")
+                {
+                    Port = 587,
+                    Credentials = new NetworkCredential(fromEmail, appPassword),
+                    EnableSsl = true
+                };
+
+                try
+                {
+                    smtpClient.Send(mail);
+                    Console.WriteLine("Email notification sent");
+
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("ERROR");
+                    Console.WriteLine(ex.Message, Console.ForegroundColor = ConsoleColor.Red);
+                    Console.ResetColor();
+                }
+            }
+
+        }
+
         private static void ShowUsers(string email)
         {
             if (_users.Count == 0)
@@ -384,7 +741,7 @@ namespace MiniChattingAppClient
                     bw.Write(email);
                     bw.Write(username ?? "Unknown");
                     var br = new BinaryReader(stream);
-                    ServerReader(client);
+                    _ = ServerReader(client, email);
                 }
             }
             catch (Exception ex)
@@ -395,7 +752,7 @@ namespace MiniChattingAppClient
             }
         }
 
-        private static void ServerReader(TcpClient client)
+        private static async Task ServerReader(TcpClient client, string email)
         {
             var stream = client.GetStream();
             var br = new BinaryReader(stream);
@@ -412,7 +769,12 @@ namespace MiniChattingAppClient
                     result.Remove(0, 3).ShowRedText();
                     Environment.Exit(0);
                 }
-                if (result.StartsWith(":I"))
+                if (result == "--FileStartReady")
+                {
+                    _isReceivingFile = true;
+                    await FileGetter(client, email);
+                }
+                else if (result.StartsWith(":I"))
                 {
                     result = result.Remove(0, 3);
                     Console.WriteLine(result);
@@ -420,23 +782,32 @@ namespace MiniChattingAppClient
                 else if (Helper.IsValidJson(result))
                 {
                     var jsonFile = JsonDocument.Parse(result);
-                    if (jsonFile.RootElement.GetArrayLength() != 0)
+                    if (jsonFile.RootElement.ValueKind == JsonValueKind.Array &&
+                        jsonFile.RootElement.GetArrayLength() != 0)
                     {
-                        var type = jsonFile.RootElement[0].GetProperty("Type").GetString();
-                        if (type == "user")
+                        if (jsonFile.RootElement.GetArrayLength() == 0)
                         {
-                            _users = JsonConvert.DeserializeObject<List<User>>(result)!;
                             _usersReady.Set();
-                        }
-                        else if (type == "message")
-                        {
-                            _messages = JsonConvert.DeserializeObject<List<Message>>(result)!;
                             _messagesReady.Set();
                         }
-                        else if (type == "fileMessage")
+                        else
                         {
-                            _fileMessages = JsonConvert.DeserializeObject<List<FileMessage>>(result)!;
-                            _fileMessagesReady.Set();
+                            var type = jsonFile.RootElement[0].GetProperty("Type").GetString();
+                            if (type == "user")
+                            {
+                                _users = JsonConvert.DeserializeObject<List<User>>(result)!;
+                                _usersReady.Set();
+                            }
+                            else if (type == "message")
+                            {
+                                _messages = JsonConvert.DeserializeObject<List<Message>>(result)!;
+                                _messagesReady.Set();
+                            }
+                            else if (type == "fileMessage")
+                            {
+                                _fileMessages = JsonConvert.DeserializeObject<List<FileMessage>>(result)!;
+                                _fileMessagesReady.Set();
+                            }
                         }
                     }
                 }
@@ -456,8 +827,6 @@ namespace MiniChattingAppClient
             {
                 ex.Message.ShowRedText();
             }
-
-
         }
 
         #endregion
