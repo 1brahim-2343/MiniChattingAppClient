@@ -713,7 +713,8 @@ namespace MiniChattingAppClient
             {
                 foreach (var message in unreadMessages)
                 {
-                    Console.Write("New message(s) from");
+                    Console.Write("New message(s) from ");
+
                     Console.WriteLine(_users.FirstOrDefault(u => u.Id == message.Key)!.Username);
                 }
             }
